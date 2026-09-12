@@ -1,0 +1,18 @@
+# 忽略敏感信息与本地产物
+.env
+.token_cache.json
+*.draft.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地预览与生成物
+preview.html
+generated-images/
+
+# 系统
+.DS_Store
+Thumbs.db

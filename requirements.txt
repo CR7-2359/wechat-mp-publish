@@ -1,0 +1,4 @@
+requests>=2.31
+markdown>=3.5
+python-dotenv>=1.0
+pillow>=10.0
