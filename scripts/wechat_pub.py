@@ -272,12 +272,47 @@ def wechat_seen_ip(tries: int = 3) -> tuple[str, str]:
 
 
 def _cidr_for(ip: str) -> list[str]:
-    """给出建议填写的白名单条目：具体 IP + 同 /24 网段。"""
+    """给出建议填写的白名单条目。
+
+    实测该网络（移动 CGNAT）的微信侧出口会跨 /24 漂移
+    （223.104.72.x → 223.104.88.x → 223.104.80.x），
+    所以 /24 往往不够，需要连同 /16 一起填。
+    """
     out = [ip]
     parts = ip.split(".")
     if len(parts) == 4:
         out.append(".".join(parts[:3]) + ".0/24")
+        out.append(".".join(parts[:2]) + ".0.0/16")
     return out
+
+
+def wait_until_allowed(timeout: int, interval: int = 25) -> bool:
+    """轮询 token 接口，直到当前出口 IP 进入白名单（或超时）。
+
+    用途：用户在后台加完白名单后不必再手跑一次 —— 网段生效有几分钟延迟，
+    这里自动等到生效就继续。探测用只读的 token 接口，不会产生任何草稿。
+    """
+    deadline = time.time() + timeout
+    n = 0
+    while True:
+        n += 1
+        try:
+            j = requests.get(f"{BASE}/cgi-bin/token",
+                             params={"grant_type": "client_credential",
+                                     "appid": APPID, "secret": APPSECRET},
+                             timeout=10).json()
+        except requests.RequestException as e:
+            j = {"errmsg": f"请求失败 {type(e).__name__}"}
+        if "access_token" in j:
+            print(f"  ✅ 第 {n} 次探测通过 —— 出口 IP 已在白名单内")
+            return True
+        m = re.search(r"invalid ip ([0-9a-fA-F:.]+)", j.get("errmsg", ""))
+        cur = m.group(1) if m else j.get("errmsg", "未知错误")
+        if time.time() >= deadline:
+            print(f"  ⏱ 等待超时，最后看到的 IP 仍是 {cur}")
+            return False
+        print(f"  第 {n} 次：{cur} 未在白名单，{interval}s 后重试…", flush=True)
+        time.sleep(min(interval, max(1, deadline - time.time())))
 
 
 def show_current_ip():
@@ -325,8 +360,11 @@ def show_current_ip():
         print(f"      {item}")
     print("\n提示: 网段写法受支持（如 223.104.88.0/24）；"
           "不支持 223.104.88.* 这种星号写法。")
-    print("      同段地址反复漂移 = 运营商动态 IP（移动/宽带 CGNAT），"
-          "填 /24 网段可一次覆盖；仍漂移时用固定 IP 的服务器。")
+    print("      ⚠️ /24 可能不够：实测该网络会跨 /24 漂移"
+          "（223.104.72.x → 223.104.88.x → 223.104.80.x），"
+          "建议一并加 /16，一劳永逸。")
+    print("      同段地址反复漂移 = 运营商动态 IP（移动/宽带 CGNAT）；"
+          "彻底解决请换家庭宽带或固定公网 IP 的服务器。")
 
 
 # ---------------------------------------------------------------- Markdown 处理
@@ -456,7 +494,10 @@ def main():
     ap.add_argument("--publish-existing", metavar="MEDIA_ID",
                     help="发布一个已存在的草稿（填草稿 media_id）")
     ap.add_argument("--show-ip", action="store_true",
-                    help="查询当前公网 IP（用于填公众号 IP 白名单）")
+                    help="查询【微信实际看到的】出口 IP（用于填公众号 IP 白名单）")
+    ap.add_argument("--wait-ip", type=int, metavar="SECONDS", default=0,
+                    help="先等出口 IP 进入白名单（最多 SECONDS 秒）再上传；"
+                         "加完白名单不必手跑第二次，如 --wait-ip 600")
     ap.add_argument("--env-file", help="指定 .env 文件路径")
     args = ap.parse_args()
 
@@ -491,6 +532,14 @@ def main():
     md_file = args.md_file.resolve()
     if not md_file.exists():
         sys.exit(f"文件不存在: {md_file}")
+
+    # --- 先等白名单生效（只读探测，不会产生草稿）
+    if args.wait_ip and not args.dry_run:
+        print(f"等待出口 IP 进入白名单（最多 {args.wait_ip} 秒）…")
+        if not wait_until_allowed(args.wait_ip):
+            print("\n仍被拦截。用 --show-ip 取微信实际看到的 IP 加入白名单，"
+                  "建议一并加同段 /24 网段。")
+            return
 
     print(f"处理文章: {md_file.name}")
     article = build_article(md_file, args, args.dry_run)
