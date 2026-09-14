@@ -242,8 +242,46 @@ def _ip_from(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def wechat_seen_ip(tries: int = 3) -> tuple[str, str]:
+    """向微信 token 接口探明「微信实际看到的出口 IP」。
+
+    返回 (ip, note)。token 已可取到时返回 ("", "已可用")。
+    要点：ip-echo 站点与 api.weixin.qq.com 可能走不同的运营商出口，
+    站点查到的 IP 不能用来填白名单 —— 只有这里拿到的才准。
+    """
+    seen = []
+    for i in range(tries):
+        try:
+            r = requests.get(f"{BASE}/cgi-bin/token",
+                             params={"grant_type": "client_credential",
+                                     "appid": APPID, "secret": APPSECRET},
+                             timeout=10)
+            j = r.json()
+        except requests.RequestException as e:
+            return "", f"请求失败 {type(e).__name__}"
+        if "access_token" in j:
+            return "", "已可用"
+        m = re.search(r"invalid ip ([0-9a-fA-F:.]+)", j.get("errmsg", ""))
+        if not m:
+            return "", f"errcode={j.get('errcode')} {j.get('errmsg', '')}"
+        seen.append(m.group(1))
+        if i + 1 < tries:
+            time.sleep(0.5)
+    uniq = sorted(set(seen))
+    return (uniq[0] if len(uniq) == 1 else " / ".join(uniq)), ""
+
+
+def _cidr_for(ip: str) -> list[str]:
+    """给出建议填写的白名单条目：具体 IP + 同 /24 网段。"""
+    out = [ip]
+    parts = ip.split(".")
+    if len(parts) == 4:
+        out.append(".".join(parts[:3]) + ".0/24")
+    return out
+
+
 def show_current_ip():
-    """打印国内/境外出口 IP，判断是否有代理分流干扰"""
+    """打印出口 IP 与代理分流情况，并给出可直接填的白名单条目"""
     print("正在查询出口 IP...")
     domestic = ""
     for url in ("https://4.ipw.cn", "https://ip.3322.net",
@@ -253,21 +291,42 @@ def show_current_ip():
             break
     overseas = _ip_from("https://api.ipify.org")
 
-    print(f"\n  国内出口（微信看到的就是这个）: {domestic or '查询失败'}")
-    print(f"  境外出口（走代理时是这个）    : {overseas or '查询失败'}")
+    print(f"\n  国内出口（探测站点看到的）: {domestic or '查询失败'}")
+    print(f"  境外出口（走代理时是这个）: {overseas or '查询失败'}")
 
     if domestic and overseas and domestic != overseas:
-        print("\n  ⚠️ 两个出口不同 → 你的代理是「分流/规则模式」："
-              "国内直连、境外走 VPN。微信接口走的是国内出口。")
+        print("\n  ⚠️ 代理是「分流/规则模式」：国内直连、境外走 VPN。"
+              "微信接口走国内出口。")
     elif domestic and domestic == overseas:
-        print("\n  ℹ️ 两个出口相同 → 要么没开代理，要么是「全局模式」。"
+        print("\n  ℹ️ 两个出口相同 → 没开代理，或开了「全局模式」。"
               "全局模式下微信看到的是境外 IP，有风控风险，建议关掉。")
 
-    if domestic:
-        print(f"\n请登录 mp.weixin.qq.com → 设置与开发 → 基本配置 → IP白名单，"
-              f"把 {domestic} 加进去（每行一个）。")
-    print("\n提示: 若与微信报错里的 IP 不同，以微信报错里的为准。")
-    print("      同段地址反复漂移 = 运营商动态 IP，不是脚本问题。")
+    # --- 关键：只认微信自己报出来的 IP
+    print("\n正在向微信确认它实际看到的出口 IP ...")
+    wx_ip, note = wechat_seen_ip()
+
+    if note == "已可用":
+        print("\n  ✅ 当前出口已在白名单内，可以直接上传。")
+        return
+
+    if not wx_ip:
+        print(f"\n  ⚠️ 无法确认微信看到的 IP（{note}）")
+        print("     请检查 .env 里的 WECHAT_APPID / WECHAT_APPSECRET。")
+        return
+
+    print(f"\n  ▶ 微信实际看到: {wx_ip}")
+    if domestic and wx_ip != domestic and " / " not in wx_ip:
+        print(f"  ⚠️ 与探测站点的 {domestic} 不一样 —— 以微信这个为准！"
+              "（不同目标走不同运营商出口，填站点查到的那个是没用的）")
+
+    print("\n请登录 mp.weixin.qq.com → 设置与开发 → 基本配置 → IP白名单，"
+          "加入（每行一个，也可用网段）:")
+    for item in _cidr_for(wx_ip.split(" / ")[0]):
+        print(f"      {item}")
+    print("\n提示: 网段写法受支持（如 223.104.88.0/24）；"
+          "不支持 223.104.88.* 这种星号写法。")
+    print("      同段地址反复漂移 = 运营商动态 IP（移动/宽带 CGNAT），"
+          "填 /24 网段可一次覆盖；仍漂移时用固定 IP 的服务器。")
 
 
 # ---------------------------------------------------------------- Markdown 处理
